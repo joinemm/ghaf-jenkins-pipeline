@@ -7,6 +7,145 @@ import groovy.json.JsonOutput
 
 ////////////////////////////////////////////////////////////////////////////////
 
+def create_parallel_stages(String flakeAttr, List<Map> targets) {
+
+  // nix-eval-jobs is used to evaluate the given flake attribute, and output target information into jobs.json
+  sh "nix-eval-jobs --gc-roots-dir gcroots --flake ${flakeAttr} --force-recurse > jobs.json"
+
+  // jobs.json is parsed using jq. target's name and derivation path are appended as space separated row into jobs.txt
+  sh "jq -r '.attr + \" \" + .drvPath' < jobs.json > jobs.txt"
+
+  target_jobs = [:]
+  targets.each {
+    def target = it['target']
+    def archive = it['archive']
+    def scs = it['scs']
+    def hwtest_device = it['hwtest_device']
+    def timestampBegin = ""
+    def timestampEnd = ""
+    def scsdir = "scs/${target}/scs"
+
+    // row that matches this target is grepped from jobs.txt, extracting the pre-evaluated derivation path
+    def drvPath = sh (script: "cat jobs.txt | grep ${target} | cut -d ' ' -f 2", returnStdout: true).trim()
+
+    target_jobs[target] = {
+      stage("Build ${target}") {
+
+        def opts = ""
+        if (archive) {
+          opts = "--out-link archive/${target}"
+        } else {
+          opts = "--no-link"
+        }
+        try {
+          if (drvPath) {
+            timestampBegin = sh(script: "date +%s", returnStdout: true).trim()
+            sh "nix build -L ${drvPath}\\^* ${opts}"
+            timestampEnd = sh(script: "date +%s", returnStdout: true).trim()
+
+            // only attempt signing if there is something to sign
+            if (archive) {
+              def img_relpath = find_img_relpath(target, "archive")
+              sign_file("archive/${img_relpath}", "sig/${img_relpath}.sig")
+            };
+          } else {
+            error("Target \"${target}\" was not found in ${flakeAttr}")
+          }
+        } catch (InterruptedException e) {
+          throw e
+        } catch (Exception e) {
+          unstable("FAILED: ${target}")
+          currentBuild.result = "FAILURE"
+          println "Error: ${e.toString()}"
+        }
+      }
+
+      if (scs) {
+        stage("Provenance (${target})") {
+          def externalParams = """
+            {
+              "target": {
+                "name": "${target}",
+                "repository": "${env.TARGET_REPO}",
+                "ref": "${env.TARGET_COMMIT}"
+              },
+              "workflow": {
+                "name": "${env.JOB_NAME}",
+                "repository": "${env.GIT_URL}",
+                "ref": "${env.GIT_COMMIT}"
+              },
+              "job": "${env.JOB_NAME}",
+              "jobParams": ${JsonOutput.toJson(params)},
+              "buildRun": "${env.BUILD_ID}" 
+            }
+          """
+          // this environment block is only valid for the scope of this stage,
+          // preventing timestamp collision when provenances are built in parallel
+          withEnv([
+            'PROVENANCE_BUILD_TYPE="https://github.com/tiiuae/ghaf-infra/blob/ea938e90/slsa/v1.0/L1/buildtype.md"',
+            "PROVENANCE_BUILDER_ID=${env.JENKINS_URL}",
+            "PROVENANCE_INVOCATION_ID=${env.BUILD_URL}",
+            "PROVENANCE_TIMESTAMP_BEGIN=${timestampBegin}",
+            "PROVENANCE_TIMESTAMP_FINISHED=${timestampEnd}",
+            "PROVENANCE_EXTERNAL_PARAMS=${externalParams}"
+          ]) {
+            catchError(buildResult: 'SUCCESS', stageResult: 'FAILURE') {
+              def outpath = "${scsdir}/provenance.json"
+              sh """
+                mkdir -p ${scsdir}
+                sh "provenance ${drvPath} --recursive --out ${outpath} 
+              """
+              sign_file(outpath, "sig/${outpath}.sig")
+            }
+          }
+        }
+
+        stage("SBOM (${target})") {
+          catchError(buildResult: 'SUCCESS', stageResult: 'FAILURE') {
+            sh """
+              mkdir -p ${scsdir}
+              cd ${scsdir}
+              sbomnix ${drvPath}
+            """
+          }
+        }
+
+        stage("Vulnxscan (${target})") {
+          catchError(buildResult: 'SUCCESS', stageResult: 'FAILURE') {
+            sh """
+              mkdir -p ${scsdir}
+              vulnxscan ${drvPath} --out vulns.csv
+              csvcut vulns.csv --not-columns sortcol | csvlook -I >${scsdir}/vulns.txt
+            """
+          }
+        }
+      }
+
+      if (archive) {
+        stage("Archive ${target}") {
+          script {
+            archive_artifacts("archive", target)
+            archive_artifacts("sig", target)
+            if (scs) {
+              archive_artifacts("scs", target)
+            }
+          }
+        }
+      }
+
+      if (hwtest_device != null) {
+        stage("Test ${target}") {
+          script {
+            ghaf_parallel_hw_test(target, hwtest_device, '_boot_bat_')
+          }
+        }
+      }
+    }
+  }
+
+  return target_jobs
+}
+
 def flakeref_trim(String flakeref) {
   // Trim the flakeref so it can be used in artifacts storage URL:
   // Examples:
