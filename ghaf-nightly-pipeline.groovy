@@ -11,6 +11,51 @@ def WORKDIR  = 'ghaf'
 // Utils module will be loaded in the first pipeline stage
 def utils = null
 
+// Which attribute of the flake to evaluate for building
+def flakeAttr = ".#hydraJobs"
+
+// Target names must be direct children of the above
+def targets = [
+  [ target: "docs.aarch64-linux",
+  ],
+  [ target: "docs.x86_64-linux",
+  ],
+  [ target: "generic-x86_64-debug.x86_64-linux",
+    archive: true, hwtest_device: "nuc"
+  ],
+  [ target: "lenovo-x1-carbon-gen11-debug.x86_64-linux",
+    archive: true, hwtest_device: "lenovo-x1"
+  ],
+  [ target: "microchip-icicle-kit-debug-from-x86_64.x86_64-linux",
+    archive: true, hwtest_device: "riscv"
+  ],
+  [ target: "nvidia-jetson-orin-agx-debug.aarch64-linux",
+    archive: true, hwtest_device: "orin-agx"
+  ],
+  [ target: "nvidia-jetson-orin-agx-debug-from-x86_64.x86_64-linux",
+    archive: true, hwtest_device: "orin-agx"
+  ],
+  [ target: "nvidia-jetson-orin-nx-debug.aarch64-linux",
+    archive: true, hwtest_device: "orin-nx"
+  ],
+  [ target: "nvidia-jetson-orin-nx-debug-from-x86_64.x86_64-linux",
+    archive: true, hwtest_device: "orin-nx"
+  ],
+  [ target: "nxp-imx8mp-evk-debug.x86_64-linux",
+    archive: true ], 
+  [ target: "nvidia-jetson-orin-agx-debug-bpmp.aarch64-linux", 
+    archive: true ], 
+  [ target: "nvidia-jetson-orin-nx-debug-bpmp.aarch64-linux", 
+    archive: true ], 
+  [ target: "nvidia-jetson-orin-agx-debug-bpmp-from-x86_64.x86_64-linux", 
+    archive: true ], 
+  [ target: "nvidia-jetson-orin-nx-debug-bpmp-from-x86_64.x86_64-linux", 
+    archive: true ], 
+]
+
+// Container for stage definitions
+def target_jobs = [:]
+
 properties([
   githubProjectProperty(displayName: '', projectUrlStr: REPO_URL),
 ])
@@ -50,21 +95,32 @@ pipeline {
         }
       }
     }
+
+    stage('Evaluate') {
+      steps {
+        dir(WORKDIR) {
+          script {
+            target_jobs = utils.create_parallel_stages(flakeAttr, targets)
+          }
+        }
+      }
+    }
+
+    stage('Build targets') {
+      steps {
+        script {
+          parallel target_jobs
+        }
+      }
+    }
+
     stage('Build x86_64') {
       steps {
         dir(WORKDIR) {
           script {
-            utils.nix_build('.#packages.x86_64-linux.nvidia-jetson-orin-agx-debug-from-x86_64', 'archive')
-            utils.nix_build('.#packages.x86_64-linux.nvidia-jetson-orin-nx-debug-from-x86_64', 'archive')
-            utils.nix_build('.#packages.x86_64-linux.lenovo-x1-carbon-gen11-debug', 'archive')
             utils.nix_build('.#packages.x86_64-linux.lenovo-x1-carbon-gen11-debug-installer', 'archive')
             utils.nix_build('.#packages.x86_64-linux.lenovo-x1-carbon-gen11-release', 'archive')
             utils.nix_build('.#packages.x86_64-linux.lenovo-x1-carbon-gen11-release-installer', 'archive')
-            utils.nix_build('.#packages.x86_64-linux.generic-x86_64-debug', 'archive')
-            utils.nix_build('.#packages.x86_64-linux.microchip-icicle-kit-debug-from-x86_64', 'archive')
-            utils.nix_build('.#hydraJobs.nvidia-jetson-orin-agx-debug-bpmp-from-x86_64.x86_64-linux', 'archive')
-            utils.nix_build('.#hydraJobs.nvidia-jetson-orin-nx-debug-bpmp-from-x86_64.x86_64-linux', 'archive')
-            utils.nix_build('.#packages.x86_64-linux.doc')
           }
         }
       }
@@ -73,12 +129,6 @@ pipeline {
       steps {
         dir(WORKDIR) {
           script {
-            utils.nix_build('.#packages.aarch64-linux.nxp-imx8mp-evk-debug', 'archive')
-            utils.nix_build('.#packages.aarch64-linux.nvidia-jetson-orin-agx-debug', 'archive')
-            utils.nix_build('.#packages.aarch64-linux.nvidia-jetson-orin-nx-debug', 'archive')
-            utils.nix_build('.#hydraJobs.nvidia-jetson-orin-agx-debug-bpmp.aarch64-linux', 'archive')
-            utils.nix_build('.#hydraJobs.nvidia-jetson-orin-nx-debug-bpmp.aarch64-linux', 'archive')
-            utils.nix_build('.#packages.aarch64-linux.doc')
           }
         }
       }

@@ -11,20 +11,14 @@ def WORKDIR  = 'ghaf'
 // Utils module will be loaded in the first pipeline stage
 def utils = null
 
-properties([
-  githubProjectProperty(displayName: '', projectUrlStr: REPO_URL),
-])
-
 // Which attribute of the flake to evaluate for building
 def flakeAttr = ".#hydraJobs"
 
 // Target names must be direct children of the above
 def targets = [
   [ target: "docs.aarch64-linux",
-    archive: false, hwtest_device: null
   ],
   [ target: "docs.x86_64-linux",
-    archive: false, hwtest_device: null
   ],
   [ target: "generic-x86_64-debug.x86_64-linux",
     archive: true, hwtest_device: "nuc"
@@ -49,7 +43,12 @@ def targets = [
   ],
 ]
 
-target_jobs = [:]
+// Container for stage definitions
+def target_jobs = [:]
+
+properties([
+  githubProjectProperty(displayName: '', projectUrlStr: REPO_URL),
+])
 
 pipeline {
   agent { label 'built-in' }
@@ -83,63 +82,7 @@ pipeline {
       steps {
         dir(WORKDIR) {
           script {
-            // nix-eval-jobs is used to evaluate the given flake attribute, and output target information into jobs.json
-            sh "nix-eval-jobs --gc-roots-dir gcroots --flake ${flakeAttr} --force-recurse > jobs.json"
-
-            // jobs.json is parsed using jq. target's name and derivation path are appended as space separated row into jobs.txt
-            sh "jq -r '.attr + \" \" + .drvPath' < jobs.json > jobs.txt"
-
-            targets.each {
-              def target = it['target']
-
-              // row that matches this target is grepped from jobs.txt, extracting the pre-evaluated derivation path
-              def drvPath = sh (script: "cat jobs.txt | grep ${target} | cut -d ' ' -f 2", returnStdout: true).trim()
-
-              target_jobs[target] = {
-                stage("Build ${target}") {
-                  def opts = ""
-                  if (it['archive']) {
-                    opts = "--out-link archive/${target}"
-                  } else {
-                    opts = "--no-link"
-                  }
-                  try {
-                    if (drvPath) {
-                      sh "nix build -L ${drvPath}\\^* ${opts}"
-
-                      // only attempt signing if there is something to sign
-                      if (it['archive']) {
-                        def img_relpath = utils.find_img_relpath(target, "archive")
-                        utils.sign_file("archive/${img_relpath}", "sig/${img_relpath}.sig")
-                      }
-                    } else {
-                      error("Target \"${target}\" was not found in ${flakeAttr}")
-                    }
-                  } catch (InterruptedException e) {
-                    throw e
-                  } catch (Exception e) {
-                    unstable("FAILED: ${target}")
-                    currentBuild.result = "FAILURE"
-                    println "Error: ${e.toString()}"
-                  }
-                }
-
-                if (it['archive']) {
-                  stage("Archive ${target}") {
-                    script {
-                      utils.archive_artifacts("archive", target)
-                      utils.archive_artifacts("sig", target)
-                    }
-                  }
-                }
-
-                if (it['hwtest_device'] != null) {
-                  stage("Test ${target}") {
-                    utils.ghaf_parallel_hw_test(target, it['hwtest_device'], '_boot_bat_')
-                  }
-                }
-              }
-            }
+            target_jobs = utils.create_parallel_stages(flakeAttr, targets)
           }
         }
       }
