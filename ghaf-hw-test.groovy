@@ -117,12 +117,9 @@ pipeline {
       }
     }
     stage('Verify provenance') {
+      when { expression { params.containsKey('PROVENANCE_URL') && params.PROVENANCE_URL != "null" } }
       steps {
         script {
-          if(!params.containsKey('PROVENANCE_URL')) {
-            println "Missing PROVENANCE_URL parameter"
-            sh "exit 1"
-          }
           sh "rm -fr ${TMP_PROVENANCE_DIR}"
           // Wget occasionally fails due to a failure in name lookup. Below is a
           // hack to force re-try a few times before aborting. Wget options, such
